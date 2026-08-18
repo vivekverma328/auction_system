@@ -2,9 +2,16 @@ from sqlalchemy.orm import Session
 from app.models.auctions import Auction
 from app.models.users import User
 from app.schemas.auctions import AuctionCreate
-from app.repositories.auctions import create_auction, get_auction_by_id, get_all_auctions
+from app.repositories.outbox import create_outbox_event
+from app.repositories.auctions import(
+    create_auction,
+    get_auction_by_id,
+    get_all_auctions,
+    transition_auction_status
+)
 
 from datetime import datetime, timedelta, timezone
+
 
 def register_auction(db: Session, user: User, auction_data: AuctionCreate):
     now = datetime.now(timezone.utc)
@@ -37,10 +44,35 @@ def register_auction(db: Session, user: User, auction_data: AuctionCreate):
         seller_id = user.id
     )
 
-    return create_auction(db, auction)
+    try:
+        auction = create_auction(db, auction)
+
+        create_outbox_event(
+            db,
+            event_type="AUCTION_CREATED",
+            auction_id=auction.id
+        )
+
+        db.commit()
+        db.refresh(auction)
+
+        return auction
+
+    except Exception:
+        db.rollback()
+        raise
+
 
 def get_auction(db: Session, auction_id: int):
     return get_auction_by_id(db, auction_id)
 
+
 def fetch_all_auctions(db: Session):
     return get_all_auctions(db)
+
+
+def activate_auction(db: Session, auction_id: int):
+    return transition_auction_status(db, auction_id, "SCHEDULED", "ACTIVE")
+
+def end_auction(db: Session, auction_id: int):
+    return transition_auction_status(db, auction_id, "ACTIVE", "ENDED")

@@ -1,9 +1,12 @@
 from fastapi import FastAPI
 
 from app.database import engine
-
 from app.models.base import Base
+
 from app.models.users import User
+from app.models.auctions import Auction
+from app.models.outbox import OutboxEvent
+
 from app.routers.users import router as user_router
 from app.routers.auth import router as auth_router
 from app.routers.auctions import router as auction_router
