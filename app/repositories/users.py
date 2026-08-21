@@ -22,3 +22,17 @@ def update_balance(db: Session, user: User, amount: float):
     db.refresh(user)
 
     return user
+
+def get_users_by_ids_for_update(
+    db: Session,
+    user_ids: list[int]
+):
+    unique_ids = sorted(set(user_ids))
+
+    return (
+        db.query(User)
+        .filter(User.id.in_(unique_ids))
+        .order_by(User.id)
+        .with_for_update()
+        .all()
+    )

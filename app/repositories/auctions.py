@@ -12,8 +12,18 @@ def create_auction(db: Session, auction: Auction):
 def get_auction_by_id(db: Session, auction_id: int):
     return db.query(Auction).filter(Auction.id == auction_id).first()
 
-def get_all_auctions(db: Session):
-    return db.query(Auction).all()
+def get_all_auctions(
+    db: Session,
+    limit: int,
+    offset: int
+):
+    return (
+        db.query(Auction)
+        .order_by(Auction.id.desc())
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
 
 def transition_auction_status(
     db: Session,
@@ -40,3 +50,14 @@ def transition_auction_status(
     db.commit()
 
     return get_auction_by_id(db, auction_id)
+
+def get_auction_by_id_for_update(
+    db: Session,
+    auction_id: int
+):
+    return (
+        db.query(Auction)
+        .filter(Auction.id == auction_id)
+        .with_for_update()
+        .first()
+    )

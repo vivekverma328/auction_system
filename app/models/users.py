@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float
+from sqlalchemy import Column, Integer, String, Numeric
 from app.models.base import Base
 
 class User(Base):
@@ -8,4 +8,4 @@ class User(Base):
     name = Column(String, nullable=False)
     email = Column(String, unique=True, nullable=False)
     password_hash = Column(String, nullable=False)
-    account_balance = Column(Float, default=0.0)
+    account_balance = Column(Numeric(12,2), nullable=False, default=0)

@@ -25,5 +25,6 @@ class OutboxEvent(Base):
 
     processed_at = Column(
         DateTime(timezone=True),
-        nullable=True
+        nullable=True,
+        index=True
     )

@@ -1,5 +1,6 @@
-from sqlalchemy.orm import Session
 from datetime import datetime, timezone
+
+from sqlalchemy.orm import Session
 
 from app.models.outbox import OutboxEvent
 
@@ -19,12 +20,19 @@ def create_outbox_event(
     return event
 
 
-def get_pending_outbox_events(db: Session):
+def get_next_pending_outbox_event(
+    db: Session
+):
     return (
         db.query(OutboxEvent)
-        .filter(OutboxEvent.processed_at.is_(None))
+        .filter(
+            OutboxEvent.processed_at.is_(None)
+        )
         .order_by(OutboxEvent.id)
-        .all()
+        .with_for_update(
+            skip_locked=True
+        )
+        .first()
     )
 
 
@@ -32,6 +40,8 @@ def mark_outbox_processed(
     db: Session,
     event: OutboxEvent
 ):
-    event.processed_at = datetime.now(timezone.utc)
+    event.processed_at = datetime.now(
+        timezone.utc
+    )
 
     db.commit()
