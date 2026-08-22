@@ -1,39 +1,28 @@
 # Online Auction & Bidding System
 
-A backend-focused Online Auction & Bidding System built with **FastAPI, PostgreSQL, SQLAlchemy, Redis, JWT authentication, and Alembic**.
+A backend-focused auction platform built with **FastAPI, PostgreSQL, SQLAlchemy, Redis, JWT authentication, Alembic, Pytest, and Docker**.
 
-The project focuses on building a reliable and concurrent auction backend with authentication, automated auction lifecycle management, transactional bidding, balance reservation and refunds, distributed locking, background workers, failure recovery, database migrations, logging, and automated testing.
+The project focuses on reliable backend engineering: authenticated auction creation, automated lifecycle transitions, transactional bidding, concurrency control, Redis-based scheduling, failure recovery, testing, logging, and containerized local setup.
 
 ---
 
-## Features Implemented
+## Key Features
 
 ### Authentication & Users
-
-- User registration
-- User login
-- JWT-based authentication
-- OAuth2 authentication flow
+- User registration and login
+- JWT-based authentication with OAuth2
 - Protected API endpoints
-- User account balance management
-- User data stored in PostgreSQL
+- Account balance management
 
 ### Auction Management
-
-- Create auctions
-- Fetch individual auctions
-- Fetch all auctions
+- Create and fetch auctions
 - Auction ownership through authenticated users
-- Starting-price validation
-- Start-time and end-time validation
-- Minimum auction duration validation
-- Maximum auction duration validation
+- Start/end time validation
+- Minimum and maximum auction duration validation
 - Auctions can be scheduled up to 30 days in advance
-- Pagination for auction listing
+- Pagination for auction listings
 
-## Automated Auction Lifecycle
-
-Auctions automatically transition through:
+### Automated Auction Lifecycle
 
 ```text
 SCHEDULED
@@ -43,614 +32,293 @@ ACTIVE
 ENDED
 ```
 
-The lifecycle is controlled using auction `start_time` and `end_time`.
+Auction start and end times are scheduled using **Redis Sorted Sets**, and a separate background worker processes due events.
 
-Redis Sorted Sets are used to efficiently identify auctions whose scheduled execution time has arrived.
-
-## Redis-Based Scheduling
-
-Redis Sorted Sets maintain scheduled auction events:
-
-```text
-auction:start_schedule
-auction:end_schedule
-```
-
-Each auction is stored using:
-
-```text
-auction:<id>
-```
-
-with the scheduled timestamp stored as the sorted-set score.
-
-This allows the worker to efficiently retrieve only auctions whose start or end time has arrived instead of repeatedly scanning the PostgreSQL auctions table.
-
-## Background Worker
-
-The API server and auction worker run as separate processes.
-
-The worker performs two responsibilities:
-
-```text
-Redis Due Events
-      ↓
-Auction Start / End Processing
-```
-
-and:
-
-```text
-Pending Outbox Events
-      ↓
-Recovery Scheduling
-      ↓
-Redis
-```
-
-The worker continuously checks Redis for due auction events and periodically processes unhandled transactional outbox events.
-
-## Distributed Locking
-
-Redis distributed locks prevent multiple worker instances from processing the same auction concurrently.
-
-The lock implementation uses:
-
-- Redis `SET NX`
-- Automatic expiration
-- Unique lock tokens
-- Safe Lua-based lock release
-
-Conceptually:
-
-```text
-Worker A ── acquire lock ── SUCCESS
-Worker B ── acquire lock ── FAILURE
-Worker C ── acquire lock ── FAILURE
-```
-
-Only the worker that successfully acquires the lock processes the auction event.
-
-## Atomic Auction State Transitions
-
-Auction state transitions are protected at the PostgreSQL level.
-
-For example:
-
-```text
-SCHEDULED → ACTIVE
-```
-
-is performed only when the current auction status is actually:
-
-```text
-SCHEDULED
-```
-
-Similarly:
-
-```text
-ACTIVE → ENDED
-```
-
-is only allowed when the auction is currently:
-
-```text
-ACTIVE
-```
-
-This prevents stale workers or duplicate events from causing invalid transitions such as:
-
-```text
-ENDED → ACTIVE
-```
-
-# Bidding Engine
-
-Authenticated users can place bids on active auctions.
-
-The bidding system validates:
-
-- Auction exists
-- Auction is currently `ACTIVE`
+### Bidding Engine
+- Bids allowed only on `ACTIVE` auctions
 - Seller cannot bid on their own auction
 - Bid must exceed the current highest bid
-- Bidder must have sufficient account balance
+- Bidder must have sufficient balance
+- Winning bid amount is reserved immediately
+- Previous highest bidder is refunded automatically
+- Same bidder can safely raise their bid
+- Bid history with pagination
 
-## Balance Reservation
+### Concurrency & Reliability
+The system uses:
 
-When a user becomes the highest bidder, the bid amount is reserved immediately from their account balance.
+- PostgreSQL `SELECT ... FOR UPDATE`
+- Redis distributed locks using `SET NX`
+- Unique lock tokens with safe Lua-based release
+- Conditional auction state transitions
+- Database transactions
+- Transactional outbox pattern
+- Idempotent Redis scheduling
 
-Example:
+These mechanisms help prevent invalid state transitions, lost updates, duplicate processing, and inconsistent balances.
 
-```text
-Bidder Balance = 10,000
-Bid Amount      = 1,500
+### Auction Settlement
+When an auction ends, the reserved winning amount is transferred to the seller. If the auction receives no bids, it simply transitions to `ENDED`.
 
-After bid:
+---
 
-Available Balance = 8,500
-Reserved Amount   = 1,500
-```
+## Hybrid Redis + Transactional Outbox
 
-This prevents users from placing multiple bids using money that has already been committed to another auction.
-
-## Previous Bidder Refund
-
-When another bidder places a higher bid:
-
-```text
-Bidder A → 1,500
-Bidder B → 2,000
-```
-
-the system performs:
-
-```text
-Refund Bidder A
-      +
-Reserve 2,000 from Bidder B
-      +
-Update Highest Bid
-```
-
-inside the bidding transaction.
-
-## Same Bidder Raising Their Bid
-
-If the current highest bidder increases their own bid:
-
-```text
-Previous Bid = 1,500
-New Bid      = 2,000
-```
-
-the system considers the previously reserved amount while validating the bidder's available balance.
-
-This prevents the same bidder from incorrectly being charged twice.
-
-## Database Row-Level Locking
-
-Concurrent bids are protected using PostgreSQL row-level locks.
-
-The auction row is locked using:
-
-```text
-SELECT ... FOR UPDATE
-```
-
-Relevant user rows are also locked before balance modifications.
-
-This ensures concurrent bid requests cannot overwrite each other's updates or create inconsistent balances.
-
-## Bid History
-
-All successful bids are stored in PostgreSQL.
-
-Bid history can be retrieved using:
-
-```text
-GET /auctions/{auction_id}/bids
-```
-
-with pagination support.
-
-# Auction Settlement
-
-When an auction ends:
-
-```text
-ACTIVE → ENDED
-```
-
-the winning amount has already been reserved from the winning bidder.
-
-The auction settlement process transfers that reserved amount to the seller.
-
-Example:
-
-```text
-Winning Bid = 2,000
-
-Winner:
-Balance already reduced during bidding
-
-Seller:
-Balance += 2,000
-```
-
-If an auction receives no bids, it simply transitions to `ENDED` without transferring funds.
-
-# Transactional Outbox Pattern
-
-Auction creation and outbox-event creation occur inside the same PostgreSQL transaction.
+Auction creation and outbox event creation happen in the same PostgreSQL transaction:
 
 ```text
 POST /auctions
-       ↓
-PostgreSQL Transaction
-       │
-       ├── Create Auction
-       │
-       └── Create AUCTION_CREATED Outbox Event
-       │
-       ↓
-     COMMIT
+      ↓
+Create Auction
+      +
+Create AUCTION_CREATED Outbox Event
+      ↓
+COMMIT
 ```
 
-This guarantees that the auction and its scheduling event are persisted together.
-
-## Hybrid Redis + Outbox Scheduling
-
-Redis is used as the normal fast scheduling path.
-
-After the PostgreSQL transaction commits:
+After commit, Redis is used as the normal fast scheduling path:
 
 ```text
-Auction + Outbox Event
-        ↓
-      COMMIT
-        ↓
+PostgreSQL Commit
+      ↓
 Immediate Redis Scheduling
-        ↓
+      ↓
 Start + End Sorted Sets
-        ↓
+      ↓
 Outbox marked processed
 ```
 
-If Redis is temporarily unavailable:
+If Redis is unavailable:
 
 ```text
-PostgreSQL COMMIT ✅
-        ↓
+PostgreSQL Commit ✅
+      ↓
 Redis Scheduling ❌
-        ↓
+      ↓
 Outbox remains pending
-        ↓
+      ↓
 Recovery Worker
-        ↓
+      ↓
 Retry Redis Scheduling
-        ↓
-Outbox marked processed
 ```
 
-This design keeps Redis on the normal high-speed execution path while using PostgreSQL transactional outbox events as a reliability and recovery mechanism.
+This keeps Redis fast while PostgreSQL provides a durable recovery path.
 
-# Failure Safety
+---
 
-The backend uses several layers of protection:
+## Architecture
 
 ```text
-Redis Distributed Locks
-        +
-PostgreSQL Row-Level Locks
-        +
-Conditional State Transitions
-        +
-Database Transactions
-        +
-Transactional Outbox
-        +
-Idempotent Redis Scheduling
+                    Client
+                      │
+                      ▼
+                   FastAPI
+                      │
+              Routers / Services
+                      │
+                 Repositories
+                      │
+                      ▼
+                  PostgreSQL
+          ┌───────────┼───────────┐
+          │           │           │
+        Users      Auctions      Bids
+                      │
+                      ▼
+                Outbox Events
+                      │
+             Recovery when needed
+                      │
+                      ▼
+                    Redis
+            ┌─────────┴─────────┐
+            │                   │
+      Start Schedule       End Schedule
+            │                   │
+            └─────────┬─────────┘
+                      ▼
+              Background Worker
+                ┌─────┴─────┐
+                ▼           ▼
+              ACTIVE       ENDED
 ```
 
-These mechanisms reduce duplicate processing, race conditions, invalid state changes, and lost scheduling events.
+---
 
-# Database Migrations
+## Tech Stack
 
-Database schema changes are managed using **Alembic**.
+- **Language:** Python
+- **Framework:** FastAPI
+- **Database:** PostgreSQL
+- **ORM:** SQLAlchemy
+- **Migrations:** Alembic
+- **Scheduling / Locking:** Redis
+- **Authentication:** JWT + OAuth2
+- **Concurrency Control:** PostgreSQL row-level locking
+- **Testing:** Pytest + FastAPI TestClient
+- **Logging:** Python logging
+- **Containerization:** Docker + Docker Compose
+- **API Testing:** Postman
+- **Version Control:** Git + GitHub
 
-The database schema includes:
+---
 
-```text
-Users
-Auctions
-Bids
-Outbox Events
-Alembic Version
-```
+## Automated Testing
 
-Schema updates are applied using:
+The project currently has **18 passing integration tests** covering:
 
-```bash
-alembic upgrade head
-```
-
-This replaces runtime table creation and provides version-controlled database migrations.
-
-# Logging
-
-Python's built-in logging framework is used for important application and worker events.
-
-Examples include:
-
-```text
-INFO    Auction created
-INFO    Auction activated
-INFO    Bid accepted
-INFO    Auction settled
-INFO    Outbox event recovered
-WARNING Unexpected recoverable conditions
-ERROR   Worker or Redis processing failures
-```
-
-Logs include:
-
-```text
-Timestamp
-Log Level
-Module Name
-Message
-```
-
-Sensitive information such as passwords and JWT tokens is not logged.
-
-# Automated Testing
-
-The project includes integration tests using **pytest** and FastAPI's test client.
-
-Current automated coverage includes:
-
-- User registration
-- Login
-- Invalid login
-- Auction creation
-- Transactional outbox processing
-- Auction retrieval
-- Auction pagination
-- Successful bidding
-- Seller bidding validation
-- Low-bid rejection
-- Insufficient-balance rejection
+- Registration and login
+- Auction creation and retrieval
+- Pagination
+- Transactional outbox behavior
+- Successful and invalid bidding scenarios
 - Previous bidder refund
 - Same-bidder bid increase
-- Bid rejection after auction end
-- Seller settlement
-- Bid-history pagination
+- Auction settlement
+- Bid history
 - Concurrent bidding
 - Redis failure and outbox recovery
 
-Current test suite:
-
-```text
-18 tests passed
-```
-
-Tests use a separate PostgreSQL test database to avoid modifying development data.
-
-Run tests using:
+Run tests with:
 
 ```bash
 python -m pytest -v
 ```
 
-# Architecture
+Tests use a separate PostgreSQL test database through `TEST_DATABASE_URL`.
 
-```text
-                         Client
-                           │
-                           ▼
-                        FastAPI
-                           │
-                    ┌──────┴──────┐
-                    │             │
-                Authentication   Routers
-                                  │
-                                  ▼
-                               Services
-                                  │
-                                  ▼
-                             Repositories
-                                  │
-                                  ▼
-                             PostgreSQL
-                    ┌─────────────┼─────────────┐
-                    │             │             │
-                  Users        Auctions        Bids
-                                  │
-                                  ▼
-                            Outbox Events
-                                  │
-                     Recovery only when needed
-                                  │
-                                  ▼
-                                Redis
-                       ┌──────────┼──────────┐
-                       │                     │
-                 Start Schedule         End Schedule
-                       │                     │
-                       └─────────┬───────────┘
-                                 │
-                                 ▼
-                         Background Worker
-                                 │
-                      ┌──────────┴──────────┐
-                      ▼                     ▼
-                   ACTIVE                 ENDED
-```
+---
 
-# Tech Stack
-
-- **Language:** Python
-- **Backend Framework:** FastAPI
-- **Database:** PostgreSQL
-- **ORM:** SQLAlchemy
-- **Database Migrations:** Alembic
-- **Scheduling:** Redis Sorted Sets
-- **Distributed Locking:** Redis
-- **Authentication:** JWT + OAuth2
-- **Concurrency Control:** PostgreSQL Row-Level Locking
-- **API Style:** REST APIs
-- **Server:** Uvicorn
-- **Testing:** Pytest, FastAPI TestClient
-- **Logging:** Python Logging
-- **API Testing:** Postman
-- **Version Control:** Git, GitHub
-
-# Project Structure
+## Project Structure
 
 ```text
 auction_system/
-│
 ├── app/
-│   │
 │   ├── core/
-│   │   ├── dependencies.py
-│   │   ├── logging_config.py
-│   │   └── security.py
-│   │
 │   ├── models/
-│   │   ├── base.py
-│   │   ├── users.py
-│   │   ├── auctions.py
-│   │   ├── bids.py
-│   │   └── outbox.py
-│   │
 │   ├── schemas/
-│   │   ├── users.py
-│   │   ├── auctions.py
-│   │   └── bids.py
-│   │
 │   ├── routers/
-│   │   ├── users.py
-│   │   ├── auth.py
-│   │   ├── auctions.py
-│   │   └── bids.py
-│   │
 │   ├── services/
-│   │   ├── users.py
-│   │   ├── auctions.py
-│   │   └── bids.py
-│   │
 │   ├── repositories/
-│   │   ├── users.py
-│   │   ├── auctions.py
-│   │   ├── bids.py
-│   │   └── outbox.py
-│   │
 │   ├── redis/
-│   │   ├── client.py
-│   │   ├── scheduler.py
-│   │   └── lock.py
-│   │
 │   ├── workers/
-│   │   └── auction_workers.py
-│   │
 │   ├── database.py
 │   └── main.py
-│
 ├── alembic/
-│
 ├── tests/
-│   ├── conftest.py
-│   ├── test_auth.py
-│   ├── test_auctions.py
-│   ├── test_bidding.py
-│   ├── test_concurrency.py
-│   └── test_outbox_recovery.py
-│
+├── Dockerfile
+├── docker-compose.yml
 ├── alembic.ini
 ├── requirements.txt
 └── README.md
 ```
 
-# Running the Project
+---
 
-## 1. Create a virtual environment
+## Run with Docker
 
-Windows:
+Docker Compose starts the complete backend stack:
+
+```text
+FastAPI API
+Background Worker
+PostgreSQL
+Redis
+Alembic Migration Service
+```
+
+### 1. Configure environment variables
+
+Create `.env.docker` with values similar to:
+
+```env
+POSTGRES_USER=postgres
+POSTGRES_PASSWORD=your_password
+POSTGRES_DB=auction_system_db
+
+DATABASE_URL=postgresql://postgres:your_password@db:5432/auction_system_db
+
+REDIS_HOST=redis
+REDIS_PORT=6379
+```
+
+Also include the JWT/security variables required by the application.
+
+Do not commit `.env` or `.env.docker`.
+
+### 2. Start the application
+
+```bash
+docker compose up --build
+```
+
+Docker Compose starts PostgreSQL and Redis, waits for health checks, runs Alembic migrations, and then starts the API and worker.
+
+Swagger UI:
+
+```text
+http://localhost:8000/docs
+```
+
+### 3. Stop containers
+
+```bash
+docker compose down
+```
+
+PostgreSQL and Redis data are stored in Docker volumes and remain available across normal restarts.
+
+A fresh clone on another machine starts with an empty database, while Alembic automatically creates the complete schema.
+
+---
+
+## Run Without Docker
+
+Create and activate a virtual environment:
 
 ```bash
 python -m venv .venv
 .venv\Scripts\activate
 ```
 
-## 2. Install Dependencies
+Install dependencies:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-## 3. Configure Environment Variables
-
-Configure the required PostgreSQL, Redis, and JWT environment variables.
-
-Example:
-
-```text
-DATABASE_URL
-REDIS_HOST
-REDIS_PORT
-```
-
-Authentication-related secret values should also be configured through environment variables.
-
-Do not commit environment files containing secrets to GitHub.
-
-## 4. Start PostgreSQL
-
-Ensure PostgreSQL is running and the configured database exists.
-
-Apply database migrations:
+Apply migrations:
 
 ```bash
 alembic upgrade head
 ```
 
-## 5. Start Redis
-
-Ensure Redis is running and accessible using the configured Redis host and port.
-
-## 6. Start FastAPI
+Start FastAPI:
 
 ```bash
 uvicorn app.main:app --reload
 ```
 
-Swagger API documentation is available at:
-
-```text
-http://127.0.0.1:8000/docs
-```
-
-## 7. Start the Auction Worker
-
-Open another terminal using the same virtual environment:
+Start the worker in another terminal:
 
 ```bash
 python -m app.workers.auction_workers
 ```
 
-The worker handles scheduled lifecycle events and transactional-outbox recovery.
+PostgreSQL and Redis must already be running and configured through environment variables.
 
-## 8. Run Automated Tests
+---
 
-Configure a separate PostgreSQL test database using:
-
-```text
-TEST_DATABASE_URL
-```
-
-Then run:
-
-```bash
-python -m pytest -v
-```
-
-# Example Auction Flow
+## Example Auction Flow
 
 ```text
-Seller Creates Auction
+Seller creates auction
         ↓
-Auction = SCHEDULED
+SCHEDULED
         ↓
-Auction + Outbox Event committed
+Redis schedules start/end
         ↓
-Redis Start / End scheduling
-        ↓
-start_time reached
-        ↓
-SCHEDULED → ACTIVE
+ACTIVE
         ↓
 Users place bids
         ↓
@@ -660,75 +328,46 @@ Higher bid arrives
         ↓
 Previous bidder refunded
         ↓
-New bidder funds reserved
+New highest bidder funds reserved
         ↓
-end_time reached
-        ↓
-ACTIVE → ENDED
+ENDED
         ↓
 Winning amount transferred to seller
 ```
 
-# Current Status
+---
 
-Completed:
+## Current Status
 
-```text
-Authentication
-        ↓
-Auction Management
-        ↓
-Redis Scheduling
-        ↓
-Background Workers
-        ↓
-Distributed Locking
-        ↓
-Transactional Outbox
-        ↓
-Hybrid Redis + Outbox Recovery
-        ↓
-Bidding Engine
-        ↓
-Balance Reservation & Refund
-        ↓
-Concurrent Bid Protection
-        ↓
-Auction Settlement
-        ↓
-Pagination
-        ↓
-Alembic Migrations
-        ↓
-Automated Testing
-        ↓
-Logging
-```
+Backend Phase 1 is complete:
 
-# Upcoming Development
+- Authentication
+- Auction management
+- Redis scheduling
+- Background worker
+- Distributed locking
+- Transactional outbox
+- Bidding engine
+- Balance reservation and refunds
+- Concurrent bid protection
+- Settlement
+- Pagination
+- Alembic migrations
+- Automated tests
+- Logging
+- Docker
+- Docker Compose
 
-Immediate next step:
+---
 
-```text
-Docker
-    ↓
-Docker Compose
-```
+## Future Work
 
-Future phases:
+Planned next phases:
 
 - Frontend application
-- Real-time bidding updates
-- WebSockets
-- Deployment
+- Real-time bidding updates with WebSockets
+- Backend and frontend deployment
 - GitHub Actions
 - CI/CD pipeline
 - Production database and Redis services
 - Monitoring and observability
-- Additional performance improvements
-
-## Development Status
-
-The backend core is functionally complete for the current development phase.
-
-The next milestone is containerizing the backend using Docker and Docker Compose before moving toward frontend development and deployment.
